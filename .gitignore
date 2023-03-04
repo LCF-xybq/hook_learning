@@ -129,3 +129,5 @@ mmcv/
 *.yml
 *.xxx
 
+registry_learning/
+fileio/
