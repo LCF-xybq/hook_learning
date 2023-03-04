@@ -46,4 +46,50 @@ def allreduce_params(params: List[torch.nn.Parameter],
         bucket_size_mb (int, optional): Size of bucket, the unit is MB.
             Defaults to -1.
     """
-    pass
+    _, world_size = get_dist_info()
+    if world_size == 1:
+        return
+    params = [param.data for param in params]
+    if coalesce:
+        _allreduce_coalesced(params, world_size, bucket_size_mb)
+    else:
+        for tensor in params:
+            """
+            Reduces the tensor data across all machines 
+            in such a way that all get the final result.
+            """
+            dist.all_reduce(tensor.div_(world_size))
+
+
+def _allreduce_coalesced(tensors: torch.Tensor,
+                         world_size: int,
+                         bucket_size_mb: int = -1) -> None:
+    if bucket_size_mb > 0:
+        bucket_size_bytes = bucket_size_mb * 1024 * 1024
+        """
+        Group tensors into chunks. 
+        This generator yields a chunk at each time,
+        each containing tensors of same type up 
+        to certain byte limit in total size.
+    """
+        buckets = _take_tensors(tensors, bucket_size_bytes)
+    else:
+        buckets = OrderedDict()
+        for tensor in tensors:
+            tp = tensor.type()
+            if tp not in buckets:
+                buckets[tp] = []
+            buckets[tp].append(tensor)
+        buckets = buckets.values()
+
+    for bucket in buckets:
+        """
+        Flatten dense tensors into a contiguous 1D buffer. 
+        Assume tensors are of same dense type.
+        """
+        flat_tensors = _flatten_dense_tensors(bucket)
+        dist.all_reduce(flat_tensors)
+        flat_tensors.div_(world_size)
+        for tensor, synced in zip(
+                bucket, _unflatten_dense_tensors(flat_tensors, bucket)):
+            tensor.copy_(synced)
